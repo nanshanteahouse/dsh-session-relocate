@@ -1,0 +1,3 @@
+- insert:
+    - id: session-relocate
+      name: 'dsh-session-relocate'
