@@ -20,10 +20,18 @@
  * unexpected fault surfaces as `clone-failed` so clients never see an unknown
  * discriminator.
  *
+ * Remote backends (the `dsh-ssh-workspaces` full mode, for example) expose their
+ * own Workspaces and Sessions to the browser through a router that addresses
+ * them as `dsh-remote:<source>:<id>`. Those identities live in another DSH
+ * process, so this Host can neither resolve them nor attach a cloned Session to
+ * them; they are reported as `source-not-local` / `workspace-not-local` instead
+ * of looking like a deleted project.
+ *
  * Failure codes: invalid-request, invalid-session-id, source-not-found,
- * subagent-session, no-completed-turn, same-workspace, invalid-target,
- * workspace-not-found, target-not-found, target-not-a-directory, clone-failed,
- * attach-failed, method-not-allowed, content-type.
+ * source-not-local, subagent-session, no-completed-turn, same-workspace,
+ * invalid-target, workspace-not-local, workspace-unavailable,
+ * target-not-found, target-not-a-directory, clone-failed, attach-failed,
+ * method-not-allowed, content-type.
  * @module session-relocate
  */
 
@@ -51,8 +59,28 @@ export const SESSION_RELOCATE_ROUTE = SESSION_RELOCATE_PATH.slice(1)
 /** Largest JSON body the route reads. */
 const MAX_BODY_BYTES = 4096
 
-/** Stored Session ids are opaque, but never a path: refuse separators and dots. */
-const SESSION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/
+/**
+ * Stored Session ids are opaque, but never a path: refuse separators and dots.
+ * A colon is allowed because a browser-backed remote router rewrites its ids to
+ * `dsh-remote:<source>:<id>`; such an id still has to reach the route to be
+ * reported as remote rather than as malformed.
+ */
+const SESSION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,299}$/
+
+/**
+ * Prefix a remote-backend router puts on the identities it owns. The Host has no
+ * service that resolves these, so they are refused with their own code.
+ */
+const REMOTE_ID_PREFIX = 'dsh-remote:'
+
+/**
+ * Whether an identity is addressed through a remote-backend router.
+ * @param {unknown} id - Session or Workspace identity from a request.
+ * @returns {boolean} true when the id belongs to another DSH process.
+ */
+function isRemoteId(id) {
+  return typeof id === 'string' && id.startsWith(REMOTE_ID_PREFIX)
+}
 
 /** Accepted relocation modes. */
 const MODES = new Set(['move', 'copy'])
@@ -137,6 +165,20 @@ async function resolveTarget(ctx, target) {
   if (target.workspaceId !== undefined) {
     const workspace = registry.get(target.workspaceId)
     if (workspace === undefined) {
+      // Two very different situations land here: a project that was deleted
+      // while the sidebar still listed it, and a project owned by a remote
+      // backend router. The id shape separates them so the message can say
+      // which one it is; both are refused before anything is written.
+      if (isRemoteId(target.workspaceId)) {
+        return {
+          error: failure(
+            'workspace-not-local',
+            `workspace "${target.workspaceId}" belongs to a remote DSH backend; a Session cannot be attached to it from this Host`,
+            409,
+            { workspaceId: target.workspaceId, remote: true },
+          ),
+        }
+      }
       return {
         error: failure('workspace-not-found', `no Workspace has id "${target.workspaceId}"`, 404, {
           workspaceId: target.workspaceId,
@@ -150,11 +192,16 @@ async function resolveTarget(ctx, target) {
       status = 'missing-dir'
     }
     if (status !== 'ok') {
+      // The registration survives a missing directory (an unmounted share, an
+      // unplugged drive, a stopped container), so this is "temporarily
+      // unavailable", not "the project is gone".
       return {
-        error: failure('target-not-found', `the directory of workspace "${workspace.id}" no longer exists`, 409, {
-          workspaceId: workspace.id,
-          path: workspace.path,
-        }),
+        error: failure(
+          'workspace-unavailable',
+          `the directory of workspace "${workspace.id}" is not reachable right now: ${workspace.path}`,
+          409,
+          { workspaceId: workspace.id, path: workspace.path },
+        ),
       }
     }
     return { workspace }
@@ -217,6 +264,17 @@ async function inspectDirectory(ctx, path) {
  * @returns the success or failure response.
  */
 async function relocate(ctx, { sessionId, mode, target }) {
+  // A remote-backend Session is never observable here, so answer before the
+  // read: its history lives in another DSH process and only that process could
+  // hand it over.
+  if (isRemoteId(sessionId)) {
+    return failure(
+      'source-not-local',
+      `session "${sessionId}" belongs to a remote DSH backend; its history cannot be read from this Host`,
+      409,
+      { sessionId, remote: true },
+    )
+  }
   let observation
   try {
     observation = await ctx.sessionQuery.observeSession(sessionId, { projectionMode: 'all' })

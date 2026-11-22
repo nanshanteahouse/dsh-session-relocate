@@ -35,6 +35,21 @@ window.__ModuleLoader__.load({
     const ROUTE = 'api/session.relocate'
     /** Drag payload type owned by this plugin, so foreign drags are ignored. */
     const DROP_MIME = 'application/x-dsh-session-relocate'
+    /**
+     * Prefix a remote-backend router (the SSH/WSL/Docker workspaces plugin) puts
+     * on every identity it owns. Such an id names a resource inside another DSH
+     * process: this Host can neither read its log nor attach a clone to it.
+     */
+    const REMOTE_ID_PREFIX = 'dsh-remote:'
+
+    /**
+     * Whether an identity is addressed through a remote-backend router.
+     * @param id - Session or Workspace identity from the sidebar projection.
+     * @returns true when the resource lives in another DSH process.
+     */
+    function isRemoteId(id) {
+      return typeof id === 'string' && id.startsWith(REMOTE_ID_PREFIX)
+    }
     /** Safety valve: a lost `dragend` must not leave the dock on screen. */
     const DOCK_EXPIRE_MS = 20000
     /** How long a success notice stays up. */
@@ -50,6 +65,7 @@ window.__ModuleLoader__.load({
       'menu.move': 'Move to project…',
       'menu.move.blank': 'Move to project (blank session)',
       'menu.move.subagent': 'Move to project (subagent)',
+      'menu.move.remote': 'Move to project (remote session)',
       'dock.label': 'Move session to another project',
       'dock.title': 'Move to another project',
       'dock.source': '“{title}” will be rebuilt in the project you choose, with the target directory as its working directory.',
@@ -59,6 +75,8 @@ window.__ModuleLoader__.load({
       'dock.folder': 'Choose folder…',
       'dock.folderHint': 'An unregistered folder becomes a new project',
       'dock.noProjects': 'No project is registered yet — choose a folder instead.',
+      'dock.remote': 'remote project',
+      'dock.remoteHint': 'Lives in a remote DSH backend — a local session cannot be attached to it',
       'dialog.title': 'Move this session to another project',
       'dialog.desc.move': '“{title}” will be copied into the chosen project with its full history and the source session will be archived. The notice that follows can restore it.',
       'dialog.desc.copy': '“{title}” will be copied into the chosen project with its full history; the source session stays where it is.',
@@ -78,11 +96,14 @@ window.__ModuleLoader__.load({
       'error.notSession': 'Only this plugin’s drag handle carries a session here.',
       'error.noSession': 'This drag carries no session. Open a session row and drag its handle.',
       'error.sourceNotFound': 'That session no longer exists.',
+      'error.sourceNotLocal': 'This session runs in a remote DSH backend, so its history cannot be read here. Open the remote project and move the session inside it.',
       'error.subagent': 'A subagent conversation cannot be moved on its own.',
       'error.noTurn': 'This session has no completed turn yet, so there is no history to carry over. Start a new session in the target project instead.',
       'error.same': 'It is already in that project.',
       'error.target': 'The target is not an existing directory.',
       'error.workspace': 'That project no longer exists.',
+      'error.workspaceUnavailable': 'That project’s directory is not reachable right now — the connection may be down or a share may be unmounted. Reconnect it and try again.',
+      'error.workspaceNotLocal': 'That project belongs to a remote DSH backend. A session cannot be moved across DSH processes; add the same directory as a lightweight project, or move the session on the remote side.',
       'error.clone': 'The session could not be rebuilt in the target project.',
       'error.attach': 'The session was created but could not join the target project.',
       'error.pickFailed': 'The folder chooser is unavailable in this composition.',
@@ -101,6 +122,7 @@ window.__ModuleLoader__.load({
       'menu.move': '移动到项目…',
       'menu.move.blank': '移动到项目（空白会话）',
       'menu.move.subagent': '移动到项目（子代理）',
+      'menu.move.remote': '移动到项目（远程会话）',
       'dock.label': '把会话移动到另一个项目',
       'dock.title': '移动到另一个项目',
       'dock.source': '“{title}”会在你选中的项目里重建，并以目标目录作为工作目录。',
@@ -110,6 +132,8 @@ window.__ModuleLoader__.load({
       'dock.folder': '选择文件夹…',
       'dock.folderHint': '未登记的文件夹会注册成新项目',
       'dock.noProjects': '还没有注册任何项目，请改用“选择文件夹…”。',
+      'dock.remote': '远程项目',
+      'dock.remoteHint': '该项目在远程 DSH 里，本机会话无法挂过去',
       'dialog.title': '把这个会话移动到另一个项目',
       'dialog.desc.move': '“{title}”会连同完整历史被复制到你选中的项目，源会话将被归档；随后的提示里可以撤销。',
       'dialog.desc.copy': '“{title}”会连同完整历史被复制到你选中的项目，源会话保持原样。',
@@ -129,11 +153,14 @@ window.__ModuleLoader__.load({
       'error.notSession': '只有本插件的拖拽抓手能把会话放到这里。',
       'error.noSession': '这次拖拽没有携带会话标识，请从会话行的抓手重新拖一次。',
       'error.sourceNotFound': '这条会话已经不存在了。',
+      'error.sourceNotLocal': '这条会话跑在远程 DSH 里，本机读不到它的历史。请在远程项目窗口里打开它再移动。',
       'error.subagent': '子代理会话不能单独移动。',
       'error.noTurn': '这个会话还没有完成的回合，没有可带走的历史；请直接在目标项目里新建会话。',
       'error.same': '它已经在这个项目里了。',
       'error.target': '目标不是一个已存在的目录。',
       'error.workspace': '这个项目已经不存在了。',
+      'error.workspaceUnavailable': '这个项目的目录当前不可达，可能是连接断开或共享目录没有挂载。请恢复连接后重试。',
+      'error.workspaceNotLocal': '这个项目属于远程 DSH。会话不能跨 DSH 进程搬移：可以把同一目录加成轻量模式项目，或在远端直接迁移会话。',
       'error.clone': '无法在目标项目里重建会话。',
       'error.attach': '会话已创建，但没能加入目标项目。',
       'error.pickFailed': '当前组合没有可用的目录选择器。',
@@ -322,6 +349,7 @@ window.__ModuleLoader__.load({
       const detail = reason instanceof Error ? reason.message : String(reason)
       const mapped = {
         'source-not-found': 'error.sourceNotFound',
+        'source-not-local': 'error.sourceNotLocal',
         'subagent-session': 'error.subagent',
         'no-completed-turn': 'error.noTurn',
         'same-workspace': 'error.same',
@@ -329,6 +357,8 @@ window.__ModuleLoader__.load({
         'target-not-found': 'error.target',
         'target-not-a-directory': 'error.target',
         'workspace-not-found': 'error.workspace',
+        'workspace-not-local': 'error.workspaceNotLocal',
+        'workspace-unavailable': 'error.workspaceUnavailable',
         'clone-failed': 'error.clone',
         'attach-failed': 'error.attach',
         'picker-unavailable': 'error.pickFailed',
@@ -344,9 +374,19 @@ window.__ModuleLoader__.load({
       return { text: t(mapped), detail }
     }
 
-    /** Whether a row may be relocated at all (blank and subagent rows may not). */
+    /**
+     * Whether a row may be relocated at all.
+     *
+     * A blank row has no history to carry, a subagent row owns no independent
+     * lifecycle, and a row addressed as `dsh-remote:<source>:<id>` runs in
+     * another DSH process whose log this Host cannot read — that one is refused
+     * up front instead of failing after the drop.
+     */
     function relocatable(summary) {
-      return summary !== undefined && summary.blank !== true && summary.origin !== 'subagent'
+      return summary !== undefined
+        && summary.blank !== true
+        && summary.origin !== 'subagent'
+        && !isRemoteId(summary.id)
     }
 
     /**
@@ -562,6 +602,9 @@ window.__ModuleLoader__.load({
 
       /** A project chip is a drop target in the dock and a button in the dialog. */
       const onChipDragOver = (event, project) => {
+        // A remote project is not a drop target at all: accepting the drag and
+        // failing afterwards would only promise something this Host cannot do.
+        if (isRemoteId(project.workspaceId)) return
         const transfer = event.dataTransfer
         if (!carriesSession(transfer)) return
         event.preventDefault()
@@ -577,6 +620,10 @@ window.__ModuleLoader__.load({
         event.preventDefault()
         event.stopPropagation()
         setHovered(null)
+        if (isRemoteId(project.workspaceId)) {
+          api.notify(t('error.workspaceNotLocal'))
+          return
+        }
         const id = dropSessionId(event.dataTransfer)
         if (id === null) {
           api.dismiss()
@@ -626,25 +673,32 @@ window.__ModuleLoader__.load({
 
       const chips = projects.map((project) => {
         const isCurrent = project.workspaceId === currentProjectId
+        const isRemote = isRemoteId(project.workspaceId)
         const title = typeof project.title === 'string' && project.title !== '' ? project.title : shortPath(project.path)
+        const reason = isCurrent ? t('dock.current') : isRemote ? t('dock.remote') : shortPath(project.path)
+        const tooltip = isCurrent ? `${project.path} · ${t('dock.current')}`
+          : isRemote ? `${project.path} · ${t('dock.remoteHint')}`
+            : project.path
         return h('button', {
           key: project.workspaceId,
           type: 'button',
           className: 'sr-chip',
           'data-drop': hovered === project.workspaceId ? 'true' : 'false',
-          disabled: isCurrent || busy,
-          title: isCurrent ? `${project.path} · ${t('dock.current')}` : project.path,
-          'aria-label': isCurrent ? `${title} (${t('dock.current')})` : title,
+          disabled: isCurrent || isRemote || busy,
+          title: tooltip,
+          'aria-label': isCurrent ? `${title} (${t('dock.current')})`
+            : isRemote ? `${title} (${t('dock.remote')})`
+              : title,
           onDragOver: event => onChipDragOver(event, project),
           onDragEnter: event => onChipDragOver(event, project),
           onDrop: event => onChipDrop(event, project),
           onClick: () => {
-            if (isCurrent) return
+            if (isCurrent || isRemote) return
             submit({ workspaceId: project.workspaceId }, title, mode)
           },
         },
         h('span', { className: 'sr-chip-title' }, title),
-        h('span', { className: 'sr-chip-path' }, isCurrent ? t('dock.current') : shortPath(project.path)))
+        h('span', { className: 'sr-chip-path' }, reason))
       })
       const folderChip = h('button', {
         key: 'session-relocate.folder',
@@ -1004,11 +1058,13 @@ window.__ModuleLoader__.load({
           },
           resolve: (target) => {
             const summary = summaryOf(listSessions, target.sessionId)
-            // A blank Session has no completed turn to carry, and a subagent
-            // row owns no independent lifecycle; both keep the entry, disabled
+            // A blank Session has no completed turn to carry, a subagent row
+            // owns no independent lifecycle, and a remote-backend Session keeps
+            // its log in another DSH process; all three keep the entry, disabled
             // with the reason, so a missing action never looks like a bug.
             const reason = summary?.origin === 'subagent' ? 'subagent'
-              : summary?.blank === true ? 'blank' : null
+              : summary?.blank === true ? 'blank'
+                : isRemoteId(summary?.id ?? target.sessionId) ? 'remote' : null
             return [{
               id: 'move',
               label: reason === null ? t('menu.move') : t(`menu.move.${reason}`),
